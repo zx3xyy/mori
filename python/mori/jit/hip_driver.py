@@ -32,16 +32,53 @@ from ctypes import c_char_p, c_uint, c_void_p, POINTER, byref
 _hip: ctypes.CDLL | None = None
 
 
+def _loaded_hip_library_names() -> list[str]:
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    names = ["libamdhip64.so"]
+    rocm_lib = os.path.join(rocm_path, "lib", "libamdhip64.so")
+    try:
+        rocm_soname = os.path.basename(os.readlink(rocm_lib))
+    except OSError:
+        rocm_soname = None
+    if rocm_soname and rocm_soname.startswith("libamdhip64.so"):
+        names.append(rocm_soname)
+    return list(dict.fromkeys(names))
+
+
+def _get_loaded_hip_lib() -> ctypes.CDLL | None:
+    # Reuse a host framework's HIP runtime when one is already in-process.
+    # Loading a second libamdhip64.so can break stream capture ownership.
+    rtld_noload = getattr(os, "RTLD_NOLOAD", None)
+    if rtld_noload is None:
+        return None
+
+    mode = rtld_noload | getattr(os, "RTLD_NOW", 0)
+    for name in _loaded_hip_library_names():
+        try:
+            return ctypes.CDLL(name, mode=mode)
+        except OSError:
+            continue
+    return None
+
+
+def _hip_library_candidates() -> list[str]:
+    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+    return [
+        os.path.join(rocm_path, "lib", "libamdhip64.so"),
+        "libamdhip64.so",
+    ]
+
+
 def _get_hip_lib() -> ctypes.CDLL:
     global _hip
     if _hip is not None:
         return _hip
 
-    rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
-    candidates = [
-        os.path.join(rocm_path, "lib", "libamdhip64.so"),
-        "libamdhip64.so",
-    ]
+    _hip = _get_loaded_hip_lib()
+    if _hip is not None:
+        return _hip
+
+    candidates = _hip_library_candidates()
     for path in candidates:
         try:
             _hip = ctypes.CDLL(path)
